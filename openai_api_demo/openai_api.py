@@ -25,6 +25,8 @@ from utils import process_response, generate_chatglm3, generate_stream_chatglm3
 MODEL_PATH = os.environ.get('MODEL_PATH', 'THUDM/chatglm3-6b')
 TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", MODEL_PATH)
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+if DEVICE == 'cpu':
+    DEVICE = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 
 @asynccontextmanager
@@ -161,35 +163,14 @@ async def create_chat_completion(request: ChatCompletionRequest):
             except:
                 logger.warning("Failed to parse tool call")
 
+        logger.debug(f"count of request.functions: {len(request.functions)}")
+        logger.debug(f"function_call: {function_call}")
+
         # CallFunction
         if isinstance(function_call, dict):
             function_call = FunctionCallResponse(**function_call)
-
-
-            """
-            In this demo, we did not register any tools.
-            You can use the tools that have been implemented in our `tool_using` and implement your own streaming tool implementation here.
-            Similar to the following method:
-                function_args = json.loads(function_call.arguments)
-                tool_response = dispatch_tool(tool_name: str, tool_params: dict)
-            """
-            tool_response = ""
-
-            if not gen_params.get("messages"):
-                gen_params["messages"] = []
-
-            gen_params["messages"].append(ChatMessage(
-                role="assistant",
-                content=output,
-            ))
-            gen_params["messages"].append(ChatMessage(
-                role="function",
-                name=function_call.name,
-                content=tool_response,
-            ))
-
             # Streaming output of results after function calls
-            generate = predict(request.model, gen_params)
+            generate = parse_output_function_call(request.model, function_call)
             return EventSourceResponse(generate, media_type="text/event-stream")
 
         else:
@@ -358,7 +339,6 @@ def predict_stream(model_id, gen_params):
     else:
         yield '[DONE]'
 
-
 async def parse_output_text(model_id: str, value: str):
     """
     Directly output the text content of value
@@ -379,6 +359,23 @@ async def parse_output_text(model_id: str, value: str):
         index=0,
         delta=DeltaMessage(),
         finish_reason="stop"
+    )
+    chunk = ChatCompletionResponse(model=model_id, choices=[choice_data], object="chat.completion.chunk")
+    yield "{}".format(chunk.model_dump_json(exclude_unset=True))
+    yield '[DONE]'
+
+async def parse_output_function_call(model_id: str, value: dict):
+    """
+    Directly output the text content of value
+
+    :param model_id:
+    :param value:
+    :return:
+    """
+    choice_data = ChatCompletionResponseStreamChoice(
+        index=0,
+        delta=DeltaMessage(role="assistant", function_call=value),
+        finish_reason="function_call"
     )
     chunk = ChatCompletionResponse(model=model_id, choices=[choice_data], object="chat.completion.chunk")
     yield "{}".format(chunk.model_dump_json(exclude_unset=True))
